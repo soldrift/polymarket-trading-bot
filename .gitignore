@@ -1,8 +1,7 @@
-node_modules
-.DS_Store
+node_modules/
+dist/
+*.tsbuildinfo
+*.md
+!README.md
 .env
-
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
+.polymarket-api-creds
