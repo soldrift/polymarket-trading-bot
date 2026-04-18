@@ -6,7 +6,14 @@
       "Bash(git rm:*)",
       "Bash(pnpm install:*)",
       "Bash(pnpm lint:*)",
-      "Bash(npx next lint:*)"
+      "Bash(npx next lint:*)",
+      "Bash(npm install *)",
+      "Bash(node -e \"import\\('pino-pretty-logs'\\).then\\(m => console.log\\(Object.keys\\(m\\)\\)\\)\")",
+      "Bash(node -e \"import\\('pino-pretty-logs'\\).then\\(m => { const l = m.default || m.logger; console.log\\(typeof l, Object.keys\\(l || {}\\)\\); }\\)\")",
+      "Bash(node -e \"import\\('pino-pretty-logs'\\).then\\(m => { const mod = m.default || m; const l = mod.logger || mod; console.log\\(typeof l\\); const methods = ['info','warn','error','debug','trace','fatal','child']; methods.forEach\\(fn => console.log\\(fn, typeof l[fn]\\)\\); }\\)\")",
+      "Bash(node -e \"import\\('pino-pretty-logs'\\).then\\(m => { const mod = m.default || m; console.log\\(JSON.stringify\\(Object.keys\\(mod\\)\\)\\); const l = mod.logger; l.info\\('test info'\\); l.warn\\('test warn'\\); l.error\\('test error'\\); }\\)\")",
+      "Bash(node -e \"import\\('pino-pretty-logs'\\).then\\(m => { console.log\\('named logger:', typeof m.logger\\); m.logger.info\\({market: 'test', side: 'BUY'}, 'Trade detected'\\); }\\)\")",
+      "Bash(timeout 6 npx tsx src/index.ts)"
     ]
   }
 }

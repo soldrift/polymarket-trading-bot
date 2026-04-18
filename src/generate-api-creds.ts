@@ -2,6 +2,7 @@ import dotenv from 'dotenv';
 import { Wallet } from 'ethers';
 import { ClobClient } from '@polymarket/clob-client';
 import * as fs from 'fs';
+import { logger } from './logger.js';
 
 dotenv.config();
 
@@ -46,10 +47,10 @@ async function main(): Promise<void> {
 
   fs.writeFileSync(outputFile, fileContents, { mode: 0o600 });
 
-  console.log(`✅ API credentials have been generated successfully and written to ${outputFile}. Handle them securely and do not log them in plaintext.`);
+  logger.info(`✅ API credentials have been generated successfully and written to ${outputFile}. Handle them securely and do not log them in plaintext.`);
 }
 
 main().catch((error) => {
-  console.error('❌ Failed to generate API credentials:', error.message || error);
+  logger.error(`❌ Failed to generate API credentials: ${error.message || error}`);
   process.exit(1);
 });

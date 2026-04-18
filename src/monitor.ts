@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { config } from './config.js';
+import { logger } from './logger.js';
 
 export type TradeOutcome = 'YES' | 'NO' | 'UNKNOWN';
 
@@ -20,8 +21,8 @@ export class TradeMonitor {
 
   async initialize(): Promise<void> {
     this.lastProcessedTimestamp = Date.now();
-    console.log(`📊 Monitor initialized at ${new Date(this.lastProcessedTimestamp).toISOString()}`);
-    console.log(`   Will copy trades that occur AFTER this time`);
+    logger.info(`📊 Monitor initialized at ${new Date(this.lastProcessedTimestamp).toISOString()}`);
+    logger.info(`   Will copy trades that occur AFTER this time`);
   }
   
   private async fetchTradesFromDataApi(): Promise<Trade[]> {
@@ -50,7 +51,7 @@ export class TradeMonitor {
 
       return [];
     } catch (error: any) {
-      console.log(`⚠️  Could not fetch trades: ${error.message || 'Unknown error'}`);
+      logger.warn(`⚠️  Could not fetch trades: ${error.message || 'Unknown error'}`);
       return [];
     }
   }
@@ -103,16 +104,16 @@ export class TradeMonitor {
         this.lastProcessedTimestamp = Math.max(this.lastProcessedTimestamp, trade.timestamp);
         newTradesCount++;
 
-        console.log(`🎯 New trade detected: ${trade.side} ${trade.size} USDC @ ${trade.price.toFixed(3)}`);
-        console.log(`   Time: ${new Date(trade.timestamp).toISOString()}`);
+        logger.info(`🎯 New trade detected: ${trade.side} ${trade.size} USDC @ ${trade.price.toFixed(3)}`);
+        logger.info(`   Time: ${new Date(trade.timestamp).toISOString()}`);
         await callback(trade);
       }
 
       if (newTradesCount > 0) {
-        console.log(`🔍 Processed ${newTradesCount} new trade(s)`);
+        logger.info(`🔍 Processed ${newTradesCount} new trade(s)`);
       }
     } catch (error: any) {
-      console.error(`❌ Error polling for trades:`, error.message);
+      logger.error(`❌ Error polling for trades: ${error.message}`);
     }
   }
 

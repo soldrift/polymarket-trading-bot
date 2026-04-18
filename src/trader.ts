@@ -2,6 +2,7 @@ import { ethers } from 'ethers';
 import { ClobClient, Side, OrderType } from '@polymarket/clob-client';
 import { config } from './config.js';
 import type { Trade } from './monitor.js';
+import { logger } from './logger.js';
 
 interface MarketMetadata {
   tickSize: number;
@@ -29,9 +30,9 @@ export interface CopyExecutionResult {
 }
 
 export class TradeExecutor {
-  private wallet: ethers.Wallet;
-  private provider: ethers.providers.JsonRpcProvider;
-  private clobClient: ClobClient;
+  private wallet!: ethers.Wallet;
+  private provider!: ethers.providers.JsonRpcProvider;
+  private clobClient!: ClobClient;
   private apiCreds?: { apiKey: string; secret: string; passphrase: string };
   private marketCache: Map<string, MarketMetadata> = new Map();
   private readonly CACHE_TTL = 3600000;
@@ -55,10 +56,11 @@ export class TradeExecutor {
   private readonly MIN_PRIORITY_FEE_GWEI = parseFloat(process.env.MIN_PRIORITY_FEE_GWEI || '30');
   private readonly MIN_MAX_FEE_GWEI = parseFloat(process.env.MIN_MAX_FEE_GWEI || '60');
 
-  constructor() {
+  constructor() {}
+
+  async initialize(): Promise<void> {
     this.provider = new ethers.providers.JsonRpcProvider(config.rpcUrl);
     this.wallet = new ethers.Wallet(config.privateKey, this.provider);
-
     this.clobClient = new ClobClient(
       'https://clob.polymarket.com',
       137,
@@ -68,27 +70,25 @@ export class TradeExecutor {
       undefined,
       config.polymarketGeoToken || undefined
     );
-  }
-  
-  async initialize(): Promise<void> {
-    console.log(`🔧 Initializing trader...`);
-    console.log(`   Signing wallet (EOA): ${this.wallet.address}`);
+
+    logger.info(`🔧 Initializing trader...`);
+    logger.info(`   Signing wallet (EOA): ${this.wallet.address}`);
     const funderAddress = this.wallet.address;
-    console.log(`   Funder wallet: ${funderAddress}`);
-    console.log(`   Signature type: 0`);
+    logger.info(`   Funder wallet: ${funderAddress}`);
+    logger.info(`   Signature type: 0`);
 
     try {
       await this.deriveAndReinitApiKeys(funderAddress);
       await this.validateApiCredentials();
     } catch (error: any) {
-      console.error(`❌ Failed to initialize API credentials:`, error.message);
+      logger.error(`❌ Failed to initialize API credentials: ${error.message}`);
       throw error;
     }
 
     await this.ensureApprovals();
 
-    console.log(`✅ Trader initialized`);
-    console.log(`   Market cache: Enabled (TTL: ${this.CACHE_TTL / 1000}s)`);
+    logger.info(`✅ Trader initialized`);
+    logger.info(`   Market cache: Enabled (TTL: ${this.CACHE_TTL / 1000}s)`);
   }
 
   private isApiError(resp: any): boolean {
@@ -107,11 +107,11 @@ export class TradeExecutor {
     if (result?.error || result?.status >= 400) {
       throw new Error(`Invalid generated API credentials: ${result?.error || `status ${result?.status}`}`);
     }
-    console.log(`✅ Generated API credentials validated`);
+    logger.info(`✅ Generated API credentials validated`);
   }
 
   private async deriveAndReinitApiKeys(funderAddress: string): Promise<void> {
-    console.log(`   Generating API credentials programmatically...`);
+    logger.info(`   Generating API credentials programmatically...`);
     let creds = await this.clobClient.deriveApiKey().catch(() => null);
     if (!creds || this.isApiError(creds)) {
       creds = await this.clobClient.createApiKey();
@@ -123,9 +123,9 @@ export class TradeExecutor {
       throw new Error(`Could not create/derive API key: ${errMsg}`);
     }
 
-    console.log(`✅ API credentials generated!`);
-    console.log(`   Credentials loaded in memory for this session`);
-    console.log(`   To export reusable values, run: npm run generate-api-creds (writes .polymarket-api-creds)`);
+    logger.info(`✅ API credentials generated!`);
+    logger.info(`   Credentials loaded in memory for this session`);
+    logger.info(`   To export reusable values, run: npm run generate-api-creds (writes .polymarket-api-creds)`);
 
     this.apiCreds = {
       apiKey,
@@ -161,7 +161,7 @@ export class TradeExecutor {
 
   clearCache(): void {
     this.marketCache.clear();
-    console.log('🗑️  Market cache cleared');
+    logger.info('🗑️  Market cache cleared');
   }
   
   calculateCopySize(originalSize: number): number {
@@ -213,7 +213,7 @@ export class TradeExecutor {
 
       return metadata;
     } catch (error) {
-      console.log(`⚠️  Could not fetch market metadata for ${tokenId}, using defaults`);
+      logger.warn(`⚠️  Could not fetch market metadata for ${tokenId}, using defaults`);
       const defaultMetadata: MarketMetadata = {
         tickSize: 0.01,
         tickSizeStr: '0.01',
@@ -242,7 +242,7 @@ export class TradeExecutor {
     const validPrice = Math.max(0.01, Math.min(0.99, roundedPrice));
 
     if (Math.abs(validPrice - price) > 0.001) {
-      console.log(`   Price adjusted: ${price.toFixed(4)} → ${validPrice.toFixed(4)} (tick size: ${tickSize})`);
+      logger.info(`   Price adjusted: ${price.toFixed(4)} → ${validPrice.toFixed(4)} (tick size: ${tickSize})`);
     }
 
     return validPrice;
@@ -278,12 +278,12 @@ export class TradeExecutor {
     const orderType = config.trading.orderType;
     const copyNotional = copyNotionalOverride ?? this.calculateCopySize(originalTrade.size);
 
-    console.log(`📈 Executing copy trade (${orderType}):`);
-    console.log(`   Market: ${originalTrade.market}`);
-    console.log(`   Side: ${originalTrade.side}`);
-    console.log(`   Original size: ${originalTrade.size} USDC`);
-    console.log(`   Token ID: ${originalTrade.tokenId}`);
-    console.log(`   Copy notional: ${copyNotional} USDC`);
+    logger.info(`📈 Executing copy trade (${orderType}):`);
+    logger.info(`   Market: ${originalTrade.market}`);
+    logger.info(`   Side: ${originalTrade.side}`);
+    logger.info(`   Original size: ${originalTrade.size} USDC`);
+    logger.info(`   Token ID: ${originalTrade.tokenId}`);
+    logger.info(`   Copy notional: ${copyNotional} USDC`);
 
     return this.executeWithRetry(async () => {
       if (orderType === 'FOK' || orderType === 'FAK') {
@@ -304,9 +304,9 @@ export class TradeExecutor {
       const isRetryable = this.isRetryableError(error);
 
       if (!isRetryable || attempt >= this.RETRY_CONFIG.maxAttempts) {
-        console.error(`❌ Failed after ${attempt} attempt(s): ${error.message}`);
+        logger.error(`❌ Failed after ${attempt} attempt(s): ${error.message}`);
         if (error?.response?.data) {
-          console.error('   Response data:', error.response.data);
+          logger.error(`   Response data: ${JSON.stringify(error.response.data)}`);
         }
         throw error;
       }
@@ -316,11 +316,11 @@ export class TradeExecutor {
         this.RETRY_CONFIG.maxDelay
       );
 
-      console.log(`⚠️  Attempt ${attempt} failed: ${error.message}`);
+      logger.warn(`⚠️  Attempt ${attempt} failed: ${error.message}`);
       if (error?.response?.data) {
-        console.log('   Response data:', error.response.data);
+        logger.warn(`   Response data: ${JSON.stringify(error.response.data)}`);
       }
-      console.log(`   Retrying in ${delay}ms... (${attempt + 1}/${this.RETRY_CONFIG.maxAttempts})`);
+      logger.warn(`   Retrying in ${delay}ms... (${attempt + 1}/${this.RETRY_CONFIG.maxAttempts})`);
 
       await this.sleep(delay);
       return this.executeWithRetry(fn, attempt + 1);
@@ -333,11 +333,11 @@ export class TradeExecutor {
     const responseStatus = error?.response?.status;
 
     if (responseStatus === 401 || errorMsg.includes('unauthorized') || responseData.includes('unauthorized')) {
-      console.log('   ⚠️  Unauthorized/Invalid API key - skipping trade');
+      logger.warn('   ⚠️  Unauthorized/Invalid API key - skipping trade');
       return false;
     }
     if (responseStatus === 403 || errorMsg.includes('cloudflare') || responseData.includes('cloudflare') || responseData.includes('blocked')) {
-      console.log('   ⚠️  Access blocked (Cloudflare/geo restriction) - skipping trade');
+      logger.warn('   ⚠️  Access blocked (Cloudflare/geo restriction) - skipping trade');
       return false;
     }
 
@@ -361,7 +361,7 @@ export class TradeExecutor {
       errorMsg.includes('allowance') ||
       responseData.includes('allowance')
     ) {
-      console.log('   ⚠️  Not enough balance/allowance - skipping trade');
+      logger.warn('   ⚠️  Not enough balance/allowance - skipping trade');
       return false;
     }
 
@@ -370,12 +370,12 @@ export class TradeExecutor {
       responseData.includes('invalid') ||
       responseData.includes('bad request')
     ) {
-      console.log('   ⚠️  Invalid order parameters - skipping trade');
+      logger.warn('   ⚠️  Invalid order parameters - skipping trade');
       return false;
     }
 
     if (errorMsg.includes('duplicate') || responseData.includes('duplicate')) {
-      console.log('   ⚠️  Duplicate order - skipping');
+      logger.warn('   ⚠️  Duplicate order - skipping');
       return false;
     }
 
@@ -402,8 +402,8 @@ export class TradeExecutor {
     const validatedPrice = await this.validatePrice(limitPrice, originalTrade.tokenId);
     const copyShares = this.calculateSharesFromNotional(copyNotional, validatedPrice);
 
-    console.log(`   Limit price: ${validatedPrice.toFixed(4)}`);
-    console.log(`   Copy shares: ${copyShares}`);
+    logger.info(`   Limit price: ${validatedPrice.toFixed(4)}`);
+    logger.info(`   Copy shares: ${copyShares}`);
 
     const response = await this.clobClient.createAndPostOrder(
       {
@@ -418,7 +418,7 @@ export class TradeExecutor {
     );
 
     if (response.success) {
-      console.log(`✅ Limit order placed: ${response.orderID}`);
+      logger.info(`✅ Limit order placed: ${response.orderID}`);
       return {
         orderId: response.orderID,
         copyNotional,
@@ -429,7 +429,7 @@ export class TradeExecutor {
       };
     } else {
       const errorMsg = response.errorMsg || response.error || 'Unknown error';
-      console.log(`❌ Order failed: ${errorMsg}`);
+      logger.error(`❌ Order failed: ${errorMsg}`);
       throw new Error(`Order placement failed: ${errorMsg}`);
     }
   }
@@ -453,8 +453,8 @@ export class TradeExecutor {
     const marketPrice = this.applySlippage(bestPrice, originalTrade.side, slippageTolerance);
     const validatedPrice = await this.validatePrice(marketPrice, originalTrade.tokenId);
     const copyShares = this.calculateSharesFromNotional(copyNotional, validatedPrice);
-    console.log(`   Market price: ${validatedPrice.toFixed(4)}`);
-    console.log(`   Copy shares: ${copyShares}`);
+    logger.info(`   Market price: ${validatedPrice.toFixed(4)}`);
+    logger.info(`   Copy shares: ${copyShares}`);
 
     const orderTypeEnum = orderType === 'FOK' ? OrderType.FOK : OrderType.FAK;
     const response = await this.clobClient.createAndPostMarketOrder(
@@ -471,9 +471,9 @@ export class TradeExecutor {
     );
 
     if (response.success) {
-      console.log(`✅ ${orderType} order executed: ${response.orderID}`);
+      logger.info(`✅ ${orderType} order executed: ${response.orderID}`);
       if (response.status === 'LIVE') {
-        console.log(`   ⚠️  Order posted to book (no immediate match)`);
+        logger.warn(`   ⚠️  Order posted to book (no immediate match)`);
       }
       return {
         orderId: response.orderID,
@@ -485,7 +485,7 @@ export class TradeExecutor {
       };
     } else {
       const errorMsg = response.errorMsg || response.error || 'Unknown error';
-      console.log(`❌ Order failed: ${errorMsg}`);
+      logger.error(`❌ Order failed: ${errorMsg}`);
       throw new Error(`Order placement failed: ${errorMsg}`);
     }
   }
@@ -530,10 +530,10 @@ export class TradeExecutor {
 
       const approved = await ctf.isApprovedForAll(this.wallet.address, exchangeAddress);
       if (!approved) {
-        console.log('   ⚠️  CTF approval missing for exchange (required for SELLs)');
+        logger.warn('   ⚠️  CTF approval missing for exchange (required for SELLs)');
       }
 
-      console.log(`   Balance/allowance check passed`);
+      logger.info(`   Balance/allowance check passed`);
     } catch (error) {
       throw error;
     }
@@ -551,9 +551,9 @@ export class TradeExecutor {
   async cancelAllOrders(): Promise<void> {
     try {
       await this.clobClient.cancelAll();
-      console.log('✅ All orders cancelled');
+      logger.info('✅ All orders cancelled');
     } catch (error) {
-      console.error('Error cancelling orders:', error);
+      logger.error(`Error cancelling orders: ${error}`);
     }
   }
 
@@ -568,7 +568,7 @@ export class TradeExecutor {
     if (this.approvalsChecked) return;
     this.approvalsChecked = true;
 
-    console.log('🔐 Checking required token approvals (EOA mode)...');
+    logger.info('🔐 Checking required token approvals (EOA mode)...');
 
     const usdc = new ethers.Contract(config.contracts.usdc, this.ERC20_ABI, this.wallet);
     const ctf = new ethers.Contract(config.contracts.ctf, this.CTF_ABI, this.wallet);
@@ -576,7 +576,7 @@ export class TradeExecutor {
     const maticBal = await this.provider.getBalance(this.wallet.address);
     const maticAmount = parseFloat(ethers.utils.formatEther(maticBal));
     if (maticAmount < 0.05) {
-      console.log(`   ⚠️  Low POL/MATIC for gas: ${maticAmount.toFixed(4)}`);
+      logger.warn(`   ⚠️  Low POL/MATIC for gas: ${maticAmount.toFixed(4)}`);
     }
 
     const decimals = await usdc.decimals();
@@ -592,13 +592,13 @@ export class TradeExecutor {
     for (const spender of usdcSpenders) {
       const allowance = await usdc.allowance(this.wallet.address, spender.address);
       if (allowance.lt(minAllowance)) {
-        console.log(`   Approving USDC.e to ${spender.name} (${spender.address})...`);
+        logger.info(`   Approving USDC.e to ${spender.name} (${spender.address})...`);
         const tx = await usdc.approve(spender.address, ethers.constants.MaxUint256, gasOverrides);
-        console.log(`   Tx: ${tx.hash}`);
+        logger.info(`   Tx: ${tx.hash}`);
         await tx.wait();
-        console.log(`   ✅ USDC.e approved to ${spender.name}`);
+        logger.info(`   ✅ USDC.e approved to ${spender.name}`);
       } else {
-        console.log(`   ✅ USDC.e already approved to ${spender.name}`);
+        logger.info(`   ✅ USDC.e already approved to ${spender.name}`);
       }
     }
 
@@ -610,13 +610,13 @@ export class TradeExecutor {
     for (const operator of operators) {
       const approved = await ctf.isApprovedForAll(this.wallet.address, operator.address);
       if (!approved) {
-        console.log(`   Approving CTF for ${operator.name} (${operator.address})...`);
+        logger.info(`   Approving CTF for ${operator.name} (${operator.address})...`);
         const tx = await ctf.setApprovalForAll(operator.address, true, gasOverrides);
-        console.log(`   Tx: ${tx.hash}`);
+        logger.info(`   Tx: ${tx.hash}`);
         await tx.wait();
-        console.log(`   ✅ CTF approved for ${operator.name}`);
+        logger.info(`   ✅ CTF approved for ${operator.name}`);
       } else {
-        console.log(`   ✅ CTF already approved for ${operator.name}`);
+        logger.info(`   ✅ CTF already approved for ${operator.name}`);
       }
     }
   }

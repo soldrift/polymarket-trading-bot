@@ -1,6 +1,7 @@
 import dotenv from 'dotenv';
 import { Wallet } from 'ethers';
 import { ClobClient } from '@polymarket/clob-client';
+import { logger } from './logger.js';
 
 dotenv.config();
 
@@ -36,16 +37,16 @@ async function main(): Promise<void> {
     throw new Error(result?.error || `API returned status ${result?.status}`);
   }
 
-  console.log('✅ Static API credentials are valid for this signer');
-  console.log(JSON.stringify(result, null, 2));
+  logger.info('✅ Static API credentials are valid for this signer');
+  logger.info(JSON.stringify(result, null, 2));
 }
 
 main().catch((error) => {
-  console.error('❌ API credential validation failed:', error.message || error);
+  logger.error(`❌ API credential validation failed: ${error.message || error}`);
   const msg = String(error?.message || '').toLowerCase();
   if (msg.includes('unauthorized/invalid api key')) {
-    console.error('   Hint: Builder dashboard keys are not user trading credentials.');
-    console.error('   Generate user credentials from PRIVATE_KEY with: npm run generate-api-creds');
+    logger.error('   Hint: Builder dashboard keys are not user trading credentials.');
+    logger.error('   Generate user credentials from PRIVATE_KEY with: npm run generate-api-creds');
   }
   process.exit(1);
 });

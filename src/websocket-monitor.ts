@@ -1,6 +1,7 @@
 import WebSocket from 'ws';
 import { config } from './config.js';
 import type { Trade } from './monitor.js';
+import { logger } from './logger.js';
 
 interface WebSocketMessage {
   event_type?: string;
@@ -63,7 +64,7 @@ export class WebSocketMonitor {
     }
 
     if (!this.hasSubscriptions()) {
-      console.log('ℹ️  WebSocket waiting for first subscription before connecting');
+      logger.info('ℹ️  WebSocket waiting for first subscription before connecting');
       return;
     }
 
@@ -73,12 +74,12 @@ export class WebSocketMonitor {
   private async connect(): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
-        console.log('🔌 Connecting to Polymarket WebSocket...');
+        logger.info('🔌 Connecting to Polymarket WebSocket...');
         const url = this.channel === 'user' ? this.WS_URL_USER : this.WS_URL_MARKET;
         this.ws = new WebSocket(url);
 
         this.ws.on('open', () => {
-          console.log('✅ WebSocket connected');
+          logger.info('✅ WebSocket connected');
           this.isConnected = true;
           this.reconnectAttempts = 0;
           this.startPingInterval();
@@ -92,7 +93,7 @@ export class WebSocketMonitor {
 
         this.ws.on('close', (code: number, reason: Buffer) => {
           const reasonText = reason?.toString() || 'no reason';
-          console.log(`❌ WebSocket disconnected (code=${code}, reason=${reasonText})`);
+          logger.warn(`❌ WebSocket disconnected (code=${code}, reason=${reasonText})`);
           this.isConnected = false;
           this.ws = null;
           this.stopPingInterval();
@@ -102,7 +103,7 @@ export class WebSocketMonitor {
         });
 
         this.ws.on('error', (error: Error) => {
-          console.error('WebSocket error:', error.message);
+          logger.error(`WebSocket error: ${error.message}`);
           reject(error);
         });
 
@@ -138,7 +139,7 @@ export class WebSocketMonitor {
 
   async subscribeToMarket(tokenId: string): Promise<void> {
     if (this.channel !== 'market') {
-      console.log(`⚠️  subscribeToMarket ignored (current channel: ${this.channel})`);
+      logger.warn(`⚠️  subscribeToMarket ignored (current channel: ${this.channel})`);
       return;
     }
 
@@ -148,7 +149,7 @@ export class WebSocketMonitor {
 
     this.subscribedAssets.add(tokenId);
     if (!this.isConnected || !this.ws) {
-      console.log(`ℹ️  Queued market subscription for ${tokenId}; connecting websocket`);
+      logger.info(`ℹ️  Queued market subscription for ${tokenId}; connecting websocket`);
       await this.ensureConnected();
       return;
     }
@@ -159,12 +160,12 @@ export class WebSocketMonitor {
     };
 
     this.ws.send(JSON.stringify(subscribeMessage));
-    console.log(`📡 Subscribed to market: ${tokenId}`);
+    logger.info(`📡 Subscribed to market: ${tokenId}`);
   }
 
   async subscribeToCondition(conditionId: string): Promise<void> {
     if (this.channel !== 'user') {
-      console.log(`⚠️  subscribeToCondition ignored (current channel: ${this.channel})`);
+      logger.warn(`⚠️  subscribeToCondition ignored (current channel: ${this.channel})`);
       return;
     }
     if (this.subscribedMarkets.has(conditionId)) {
@@ -173,7 +174,7 @@ export class WebSocketMonitor {
 
     this.subscribedMarkets.add(conditionId);
     if (!this.isConnected || !this.ws) {
-      console.log(`ℹ️  Queued user-channel subscription for ${conditionId}; connecting websocket`);
+      logger.info(`ℹ️  Queued user-channel subscription for ${conditionId}; connecting websocket`);
       await this.ensureConnected();
       return;
     }
@@ -185,7 +186,7 @@ export class WebSocketMonitor {
     };
 
     this.ws.send(JSON.stringify(subscribeMessage));
-    console.log(`📡 Subscribed to market (user channel): ${conditionId}`);
+    logger.info(`📡 Subscribed to market (user channel): ${conditionId}`);
   }
 
   async unsubscribeFromMarket(tokenId: string): Promise<void> {
@@ -203,7 +204,7 @@ export class WebSocketMonitor {
 
     this.ws.send(JSON.stringify(unsubscribeMessage));
     this.subscribedAssets.delete(tokenId);
-    console.log(`📡 Unsubscribed from market: ${tokenId}`);
+    logger.info(`📡 Unsubscribed from market: ${tokenId}`);
   }
 
   async unsubscribeFromCondition(conditionId: string): Promise<void> {
@@ -222,7 +223,7 @@ export class WebSocketMonitor {
 
     this.ws.send(JSON.stringify(unsubscribeMessage));
     this.subscribedMarkets.delete(conditionId);
-    console.log(`📡 Unsubscribed from market (user channel): ${conditionId}`);
+    logger.info(`📡 Unsubscribed from market (user channel): ${conditionId}`);
   }
 
   private handleMessage(data: string): void {
@@ -246,7 +247,7 @@ export class WebSocketMonitor {
         this.handleTradeMessage(message as LastTradeMessage);
       }
     } catch (error) {
-      console.error('Error parsing WebSocket message:', error);
+      logger.error(`Error parsing WebSocket message: ${error}`);
     }
   }
 
@@ -274,14 +275,14 @@ export class WebSocketMonitor {
         outcome: this.normalizeOutcome(message.outcome),
       };
 
-      console.log(`⚡ WebSocket trade detected: ${trade.side} ${trade.size} USDC @ ${trade.price.toFixed(3)}`);
+      logger.info(`⚡ WebSocket trade detected: ${trade.side} ${trade.size} USDC @ ${trade.price.toFixed(3)}`);
 
       // Trigger callback
       if (this.onTradeCallback) {
         await this.onTradeCallback(trade);
       }
     } catch (error) {
-      console.error('Error handling trade message:', error);
+      logger.error(`Error handling trade message: ${error}`);
     }
   }
 
@@ -314,14 +315,14 @@ export class WebSocketMonitor {
 
   private attemptReconnect(): void {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.error('❌ Max reconnection attempts reached. Giving up on WebSocket.');
+      logger.error('❌ Max reconnection attempts reached. Giving up on WebSocket.');
       return;
     }
 
     this.reconnectAttempts++;
     const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
 
-    console.log(`🔄 Reconnecting in ${delay / 1000}s (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
+    logger.info(`🔄 Reconnecting in ${delay / 1000}s (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
 
     setTimeout(async () => {
       try {
@@ -337,7 +338,7 @@ export class WebSocketMonitor {
           }
         }
       } catch (error) {
-        console.error('Reconnection failed:', error);
+        logger.error(`Reconnection failed: ${error}`);
         this.attemptReconnect();
       }
     }, delay);
@@ -350,7 +351,7 @@ export class WebSocketMonitor {
       this.ws = null;
     }
     this.isConnected = false;
-    console.log('🔌 WebSocket connection closed');
+    logger.info('🔌 WebSocket connection closed');
   }
 
   getConnectionStatus(): {
