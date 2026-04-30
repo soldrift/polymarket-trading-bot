@@ -22,7 +22,8 @@ export class PositionTracker {
         pos?.asset_id ||
         pos?.token_id ||
         pos?.tokenId ||
-        pos?.assetId;
+        pos?.assetId ||
+        (typeof pos?.asset === 'string' ? pos.asset : pos?.asset?.token_id);
 
       if (!tokenId) {
         skipped++;

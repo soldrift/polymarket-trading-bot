@@ -1,14 +1,16 @@
+import axios from 'axios';
 import { ethers } from 'ethers';
-import { ClobClient, Side, OrderType } from '@polymarket/clob-client';
+import { AssetType, Chain, ClobClient, Side, OrderType } from '@polymarket/clob-client-v2';
 import { config } from './config.js';
 import type { Trade } from './monitor.js';
 import { logger } from './logger.js';
+
+const DATA_API_POSITIONS = 'https://data-api.polymarket.com/positions';
 
 interface MarketMetadata {
   tickSize: number;
   tickSizeStr: string;
   negRisk: boolean;
-  feeRateBps: number;
   conditionId?: string;
   timestamp: number;
 }
@@ -30,9 +32,9 @@ export interface CopyExecutionResult {
 }
 
 export class TradeExecutor {
-  private wallet!: ethers.Wallet;
-  private provider!: ethers.providers.JsonRpcProvider;
-  private clobClient!: ClobClient;
+  private wallet: ethers.Wallet;
+  private provider: ethers.providers.JsonRpcProvider;
+  private clobClient: ClobClient;
   private apiCreds?: { apiKey: string; secret: string; passphrase: string };
   private marketCache: Map<string, MarketMetadata> = new Map();
   private readonly CACHE_TTL = 3600000;
@@ -56,36 +58,38 @@ export class TradeExecutor {
   private readonly MIN_PRIORITY_FEE_GWEI = parseFloat(process.env.MIN_PRIORITY_FEE_GWEI || '30');
   private readonly MIN_MAX_FEE_GWEI = parseFloat(process.env.MIN_MAX_FEE_GWEI || '60');
 
-  constructor() {}
-
-  async initialize(): Promise<void> {
+  constructor() {
     this.provider = new ethers.providers.JsonRpcProvider(config.rpcUrl);
     this.wallet = new ethers.Wallet(config.privateKey, this.provider);
-    this.clobClient = new ClobClient(
-      'https://clob.polymarket.com',
-      137,
-      this.wallet,
-      undefined,
-      undefined,
-      undefined,
-      config.polymarketGeoToken || undefined
-    );
 
+    const builderCode = this.getBuilderCode();
+    this.clobClient = new ClobClient({
+      host: 'https://clob.polymarket.com',
+      chain: Chain.POLYGON,
+      signer: this.wallet,
+      ...(builderCode ? { builderConfig: { builderCode } } : {}),
+    });
+  }
+  
+  async initialize(): Promise<void> {
     logger.info(`🔧 Initializing trader...`);
     logger.info(`   Signing wallet (EOA): ${this.wallet.address}`);
     const funderAddress = this.wallet.address;
     logger.info(`   Funder wallet: ${funderAddress}`);
     logger.info(`   Signature type: 0`);
+    if (this.getBuilderCode()) {
+      logger.info(`   Builder attribution: enabled`);
+    }
 
     try {
       await this.deriveAndReinitApiKeys(funderAddress);
       await this.validateApiCredentials();
     } catch (error: any) {
-      logger.error(`❌ Failed to initialize API credentials: ${error.message}`);
+      logger.error(`❌ Failed to initialize API credentials:`, error.message);
       throw error;
     }
 
-    await this.ensureApprovals();
+    await this.ensureApprovals(); // non-fatal: logs per-step errors, does not throw
 
     logger.info(`✅ Trader initialized`);
     logger.info(`   Market cache: Enabled (TTL: ${this.CACHE_TTL / 1000}s)`);
@@ -133,19 +137,25 @@ export class TradeExecutor {
       passphrase: creds.passphrase,
     };
 
-    this.clobClient = new ClobClient(
-      'https://clob.polymarket.com',
-      137,
-      this.wallet,
-      {
+    const builderCode = this.getBuilderCode();
+    this.clobClient = new ClobClient({
+      host: 'https://clob.polymarket.com',
+      chain: Chain.POLYGON,
+      signer: this.wallet,
+      creds: {
         key: apiKey,
         secret: creds.secret,
         passphrase: creds.passphrase,
       },
-      0,
+      signatureType: 0,
       funderAddress,
-      config.polymarketGeoToken || undefined
-    );
+      ...(builderCode ? { builderConfig: { builderCode } } : {}),
+    });
+  }
+
+  private getBuilderCode(): string | undefined {
+    const code = config.builderCode?.trim();
+    return code ? code : undefined;
   }
 
   getWsAuth(): { apiKey: string; secret: string; passphrase: string } | undefined {
@@ -183,6 +193,11 @@ export class TradeExecutor {
     return Math.round(shares * 10000) / 10000;
   }
 
+  /** Public helper for computing copy shares from notional (used for SELL position checks). */
+  calculateSharesForNotional(notional: number, price: number): number {
+    return this.calculateSharesFromNotional(notional, price);
+  }
+
   async getMarketMetadata(tokenId: string): Promise<MarketMetadata> {
     const cached = this.marketCache.get(tokenId);
     const now = Date.now();
@@ -192,10 +207,9 @@ export class TradeExecutor {
     }
 
     try {
-      const [tickSizeData, negRisk, feeRateBps] = await Promise.all([
+      const [tickSizeData, negRisk] = await Promise.all([
         this.clobClient.getTickSize(tokenId).catch(() => ({ minimum_tick_size: '0.01' })),
         this.clobClient.getNegRisk(tokenId).catch(() => false),
-        this.clobClient.getFeeRateBps(tokenId).catch(() => 0),
       ]);
 
       const tickSizeStr = (tickSizeData as any)?.minimum_tick_size || tickSizeData || '0.01';
@@ -205,7 +219,6 @@ export class TradeExecutor {
         tickSize,
         tickSizeStr,
         negRisk,
-        feeRateBps,
         timestamp: now,
       };
 
@@ -218,7 +231,6 @@ export class TradeExecutor {
         tickSize: 0.01,
         tickSizeStr: '0.01',
         negRisk: false,
-        feeRateBps: 0,
         timestamp: now,
       };
       this.marketCache.set(tokenId, defaultMetadata);
@@ -306,7 +318,7 @@ export class TradeExecutor {
       if (!isRetryable || attempt >= this.RETRY_CONFIG.maxAttempts) {
         logger.error(`❌ Failed after ${attempt} attempt(s): ${error.message}`);
         if (error?.response?.data) {
-          logger.error(`   Response data: ${JSON.stringify(error.response.data)}`);
+          logger.error('   Response data:', String(error.response.data));
         }
         throw error;
       }
@@ -318,9 +330,9 @@ export class TradeExecutor {
 
       logger.warn(`⚠️  Attempt ${attempt} failed: ${error.message}`);
       if (error?.response?.data) {
-        logger.warn(`   Response data: ${JSON.stringify(error.response.data)}`);
+        logger.warn('   Response data:', String(error.response.data));
       }
-      logger.warn(`   Retrying in ${delay}ms... (${attempt + 1}/${this.RETRY_CONFIG.maxAttempts})`);
+      logger.info(`   Retrying in ${delay}ms... (${attempt + 1}/${this.RETRY_CONFIG.maxAttempts})`);
 
       await this.sleep(delay);
       return this.executeWithRetry(fn, attempt + 1);
@@ -387,7 +399,7 @@ export class TradeExecutor {
   }
 
   private async executeLimitOrder(originalTrade: Trade, copyNotional: number): Promise<CopyExecutionResult> {
-    await this.validateBalance(copyNotional, originalTrade.tokenId);
+    await this.validateBalanceOrShares(originalTrade.side, copyNotional, originalTrade.tokenId);
 
     const [orderbook, orderOpts] = await Promise.all([
       this.clobClient.getOrderBook(originalTrade.tokenId),
@@ -405,13 +417,14 @@ export class TradeExecutor {
     logger.info(`   Limit price: ${validatedPrice.toFixed(4)}`);
     logger.info(`   Copy shares: ${copyShares}`);
 
+    const builderCode = this.getBuilderCode();
     const response = await this.clobClient.createAndPostOrder(
       {
         tokenID: originalTrade.tokenId,
         price: validatedPrice,
         size: copyShares,
         side: originalTrade.side as Side,
-        feeRateBps: 0,
+        ...(builderCode ? { builderCode } : {}),
       },
       orderOpts,
       OrderType.GTC
@@ -439,7 +452,7 @@ export class TradeExecutor {
     orderType: 'FOK' | 'FAK',
     copyNotional: number
   ): Promise<CopyExecutionResult> {
-    await this.validateBalance(copyNotional, originalTrade.tokenId);
+    await this.validateBalanceOrShares(originalTrade.side, copyNotional, originalTrade.tokenId);
 
     const [orderbook, orderOpts] = await Promise.all([
       this.clobClient.getOrderBook(originalTrade.tokenId),
@@ -457,14 +470,15 @@ export class TradeExecutor {
     logger.info(`   Copy shares: ${copyShares}`);
 
     const orderTypeEnum = orderType === 'FOK' ? OrderType.FOK : OrderType.FAK;
+    const builderCode = this.getBuilderCode();
     const response = await this.clobClient.createAndPostMarketOrder(
       {
         tokenID: originalTrade.tokenId,
         amount: originalTrade.side === 'BUY' ? copyNotional : copyShares,
         price: validatedPrice,
         side: originalTrade.side as Side,
-        feeRateBps: 0,
         orderType: orderTypeEnum,
+        ...(builderCode ? { builderCode } : {}),
       },
       orderOpts,
       orderTypeEnum
@@ -490,41 +504,105 @@ export class TradeExecutor {
     }
   }
 
+  private async validateBalanceOrShares(
+    side: 'BUY' | 'SELL',
+    copyNotional: number,
+    tokenId: string
+  ): Promise<void> {
+    if (side === 'SELL') {
+      await this.validateSharesForSell(copyNotional, tokenId);
+      return;
+    }
+    await this.validateBalance(copyNotional, tokenId);
+  }
+
+  private async validateSharesForSell(copyNotional: number, tokenId: string): Promise<void> {
+    const orderbook = await this.clobClient.getOrderBook(tokenId);
+    const bestBid = orderbook.bids[0]?.price;
+    const price = bestBid ? parseFloat(bestBid) : 0.5;
+    const copyShares = this.calculateSharesFromNotional(copyNotional, price);
+
+    const positions = await this.fetchPositionsFromDataApi();
+    const pos = this.findPositionByTokenId(positions, tokenId);
+    const availableShares = this.getPositionShares(pos);
+
+    if (availableShares < copyShares) {
+      throw new Error(
+        `insufficient shares to sell (have ${availableShares.toFixed(4)}, need ${copyShares.toFixed(4)})`
+      );
+    }
+    logger.info(`   Shares balance check passed (${availableShares.toFixed(4)} >= ${copyShares.toFixed(4)})`);
+  }
+
+  private getPositionTokenId(p: any): string | undefined {
+    if (!p) return undefined;
+    const id = p.asset_id ?? p.token_id ?? p.tokenId ?? p.assetId ?? (typeof p.asset === 'string' ? p.asset : p.asset?.token_id);
+    return id ? String(id).trim() : undefined;
+  }
+
+  private getPositionShares(p: any): number {
+    if (!p) return 0;
+    const raw = p.size ?? p.quantity ?? p.shares ?? p.balance ?? p.position;
+    const n = typeof raw === 'string' ? parseFloat(raw) : Number(raw);
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  private findPositionByTokenId(positions: any[], tokenId: string): any {
+    const target = tokenId.toLowerCase();
+    return (positions || []).find((p) => this.getPositionTokenId(p)?.toLowerCase() === target);
+  }
+
+  private async fetchPositionsFromDataApi(): Promise<any[]> {
+    try {
+      const res = await axios.get(DATA_API_POSITIONS, {
+        params: { user: this.wallet.address.toLowerCase(), limit: 500 },
+        headers: { Accept: 'application/json' },
+      });
+      return Array.isArray(res.data) ? res.data : [];
+    } catch (err: any) {
+      logger.warn(`⚠️  Could not fetch positions from Data API: ${err?.message || 'Unknown error'}`);
+      return [];
+    }
+  }
+
   private async validateBalance(requiredAmount: number, tokenId: string): Promise<void> {
     try {
       const metadata = await this.getMarketMetadata(tokenId);
       const exchangeAddress = metadata.negRisk ? config.contracts.negRiskExchange : config.contracts.exchange;
 
-      const usdc = new ethers.Contract(config.contracts.usdc, this.ERC20_ABI, this.wallet);
+      const collateral = new ethers.Contract(config.contracts.collateral, this.ERC20_ABI, this.wallet);
       const ctf = new ethers.Contract(config.contracts.ctf, this.CTF_ABI, this.wallet);
-      const decimals = await usdc.decimals();
+      const decimals = await collateral.decimals();
       const required = ethers.utils.parseUnits(requiredAmount.toString(), decimals);
 
-      const balance = await usdc.balanceOf(this.wallet.address);
+      const balance = await collateral.balanceOf(this.wallet.address);
       if (balance.lt(required)) {
         const bal = ethers.utils.formatUnits(balance, decimals);
-        throw new Error(`not enough balance / allowance (USDC.e balance ${bal} < required ${requiredAmount})`);
+        throw new Error(
+          `not enough balance / allowance (pUSD balance ${bal} < required ${requiredAmount}). ` +
+          'Manual action required: wrap USDC.e to pUSD before trading on CLOB v2.'
+        );
       }
 
-      const allowanceCtf = await usdc.allowance(this.wallet.address, config.contracts.ctf);
+      const allowanceCtf = await collateral.allowance(this.wallet.address, config.contracts.ctf);
       if (allowanceCtf.lt(required)) {
         const allow = ethers.utils.formatUnits(allowanceCtf, decimals);
-        throw new Error(`not enough balance / allowance (USDC.e allowance to CTF ${allow} < required ${requiredAmount})`);
+        throw new Error(`not enough balance / allowance (pUSD allowance to CTF ${allow} < required ${requiredAmount})`);
       }
 
-      const allowanceEx = await usdc.allowance(this.wallet.address, exchangeAddress);
+      const allowanceEx = await collateral.allowance(this.wallet.address, exchangeAddress);
       if (allowanceEx.lt(required)) {
         const allow = ethers.utils.formatUnits(allowanceEx, decimals);
-        throw new Error(`not enough balance / allowance (USDC.e allowance to Exchange ${allow} < required ${requiredAmount})`);
+        throw new Error(`not enough balance / allowance (pUSD allowance to Exchange ${allow} < required ${requiredAmount})`);
       }
 
-      const clobBal = await this.clobClient.getBalanceAllowance({ asset_type: 'COLLATERAL' });
+      const clobBal = await this.clobClient.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
       const clobBalance = parseFloat(clobBal?.balance || '0') / 1_000_000;
       if (clobBalance < requiredAmount) {
         throw new Error(`not enough balance / allowance (CLOB balance ${clobBalance} < required ${requiredAmount})`);
       }
-      const clobAllowance = clobBal?.allowances?.[exchangeAddress] || '0';
-      if (clobAllowance === '0') {
+      const clobAllowance = parseFloat(clobBal?.allowance || '0');
+      if (!Number.isFinite(clobAllowance) || clobAllowance <= 0) {
         throw new Error(`not enough balance / allowance (CLOB allowance to Exchange is 0)`);
       }
 
@@ -541,11 +619,7 @@ export class TradeExecutor {
   
   
   async getPositions(): Promise<any[]> {
-    try {
-      return await this.clobClient.getPositions();
-    } catch {
-      return [];
-    }
+    return this.fetchPositionsFromDataApi();
   }
   
   async cancelAllOrders(): Promise<void> {
@@ -553,7 +627,7 @@ export class TradeExecutor {
       await this.clobClient.cancelAll();
       logger.info('✅ All orders cancelled');
     } catch (error) {
-      logger.error(`Error cancelling orders: ${error}`);
+      logger.error('Error cancelling orders:', String(error));
     }
   }
 
@@ -566,58 +640,83 @@ export class TradeExecutor {
   }
   private async ensureApprovals(): Promise<void> {
     if (this.approvalsChecked) return;
-    this.approvalsChecked = true;
 
     logger.info('🔐 Checking required token approvals (EOA mode)...');
 
-    const usdc = new ethers.Contract(config.contracts.usdc, this.ERC20_ABI, this.wallet);
-    const ctf = new ethers.Contract(config.contracts.ctf, this.CTF_ABI, this.wallet);
+    try {
+      const collateral = new ethers.Contract(config.contracts.collateral, this.ERC20_ABI, this.wallet);
+      const ctf = new ethers.Contract(config.contracts.ctf, this.CTF_ABI, this.wallet);
 
-    const maticBal = await this.provider.getBalance(this.wallet.address);
-    const maticAmount = parseFloat(ethers.utils.formatEther(maticBal));
-    if (maticAmount < 0.05) {
-      logger.warn(`   ⚠️  Low POL/MATIC for gas: ${maticAmount.toFixed(4)}`);
-    }
-
-    const decimals = await usdc.decimals();
-    const minAllowance = ethers.utils.parseUnits(config.trading.maxTradeSize.toString(), decimals);
-    const gasOverrides = await this.getGasOverrides();
-
-    const usdcSpenders = [
-      { name: 'CTF', address: config.contracts.ctf },
-      { name: 'CTF Exchange', address: config.contracts.exchange },
-      { name: 'Neg Risk CTF Exchange', address: config.contracts.negRiskExchange },
-    ];
-
-    for (const spender of usdcSpenders) {
-      const allowance = await usdc.allowance(this.wallet.address, spender.address);
-      if (allowance.lt(minAllowance)) {
-        logger.info(`   Approving USDC.e to ${spender.name} (${spender.address})...`);
-        const tx = await usdc.approve(spender.address, ethers.constants.MaxUint256, gasOverrides);
-        logger.info(`   Tx: ${tx.hash}`);
-        await tx.wait();
-        logger.info(`   ✅ USDC.e approved to ${spender.name}`);
-      } else {
-        logger.info(`   ✅ USDC.e already approved to ${spender.name}`);
+      const maticBal = await this.provider.getBalance(this.wallet.address);
+      const maticAmount = parseFloat(ethers.utils.formatEther(maticBal));
+      if (maticAmount < 0.05) {
+        logger.warn(`   ⚠️  Low POL/MATIC for gas: ${maticAmount.toFixed(4)}`);
       }
-    }
 
-    const operators = [
-      { name: 'CTF Exchange', address: config.contracts.exchange },
-      { name: 'Neg Risk CTF Exchange', address: config.contracts.negRiskExchange },
-    ];
+      const decimals = await collateral.decimals();
+      const minAllowance = ethers.utils.parseUnits(config.trading.maxTradeSize.toString(), decimals);
+      const gasOverrides = await this.getGasOverrides();
 
-    for (const operator of operators) {
-      const approved = await ctf.isApprovedForAll(this.wallet.address, operator.address);
-      if (!approved) {
-        logger.info(`   Approving CTF for ${operator.name} (${operator.address})...`);
-        const tx = await ctf.setApprovalForAll(operator.address, true, gasOverrides);
-        logger.info(`   Tx: ${tx.hash}`);
-        await tx.wait();
-        logger.info(`   ✅ CTF approved for ${operator.name}`);
-      } else {
-        logger.info(`   ✅ CTF already approved for ${operator.name}`);
+      let anyApprovalStepFailed = false;
+
+      const collateralSpenders = [
+        { name: 'CTF', address: config.contracts.ctf },
+        { name: 'CTF Exchange', address: config.contracts.exchange },
+        { name: 'Neg Risk CTF Exchange', address: config.contracts.negRiskExchange },
+      ];
+
+      for (const spender of collateralSpenders) {
+        try {
+          const allowance = await collateral.allowance(this.wallet.address, spender.address);
+          if (allowance.lt(minAllowance)) {
+            logger.info(`   Approving pUSD to ${spender.name} (${spender.address})...`);
+            const tx = await collateral.approve(spender.address, ethers.constants.MaxUint256, gasOverrides);
+            logger.info(`   Tx: ${tx.hash}`);
+            await tx.wait();
+            logger.info(`   ✅ pUSD approved to ${spender.name}`);
+          } else {
+            logger.info(`   ✅ pUSD already approved to ${spender.name}`);
+          }
+        } catch (err: any) {
+          anyApprovalStepFailed = true;
+          logger.error(
+            `   ❌ pUSD approval failed (${spender.name}): ${err?.message || String(err)} — continuing without this approval`
+          );
+        }
       }
+
+      const operators = [
+        { name: 'CTF Exchange', address: config.contracts.exchange },
+        { name: 'Neg Risk CTF Exchange', address: config.contracts.negRiskExchange },
+      ];
+
+      for (const operator of operators) {
+        try {
+          const approved = await ctf.isApprovedForAll(this.wallet.address, operator.address);
+          if (!approved) {
+            logger.info(`   Approving CTF for ${operator.name} (${operator.address})...`);
+            const tx = await ctf.setApprovalForAll(operator.address, true, gasOverrides);
+            logger.info(`   Tx: ${tx.hash}`);
+            await tx.wait();
+            logger.info(`   ✅ CTF approved for ${operator.name}`);
+          } else {
+            logger.info(`   ✅ CTF already approved for ${operator.name}`);
+          }
+        } catch (err: any) {
+          anyApprovalStepFailed = true;
+          logger.error(
+            `   ❌ CTF approval failed (${operator.name}): ${err?.message || String(err)} — continuing without this approval`
+          );
+        }
+      }
+
+      if (!anyApprovalStepFailed) {
+        this.approvalsChecked = true;
+      }
+    } catch (err: any) {
+      logger.error(
+        `🔐 Approval setup encountered an error: ${err?.message || String(err)} — bot will still start; approvals may be retried on next restart`
+      );
     }
   }
 

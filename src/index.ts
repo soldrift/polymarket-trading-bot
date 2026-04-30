@@ -1,4 +1,10 @@
-import { config, validateConfig, reloadConfig, getMissingFields } from './config.js';
+import {
+  config,
+  isEnvCredentialsReady,
+  logMissingEnvCredentials,
+  refreshConfigFromEnv,
+  validateConfig,
+} from './config.js';
 import { TradeMonitor } from './monitor.js';
 import { WebSocketMonitor } from './websocket-monitor.js';
 import type { Trade } from './monitor.js';
@@ -9,7 +15,7 @@ import { logger } from './logger.js';
 
 class PolymarketCopyBot {
   private monitor: TradeMonitor;
-  private wsMonitor?: WebSocketMonitor;
+  private wsMonitor?: WebSocketMonitor | undefined;
   private executor: TradeExecutor;
   private positions: PositionTracker;
   private risk: RiskManager;
@@ -38,18 +44,19 @@ class PolymarketCopyBot {
     logger.info(`Position multiplier: ${config.trading.positionSizeMultiplier * 100}%`);
     logger.info(`Max trade size: ${config.trading.maxTradeSize} USDC`);
     logger.info(`Order type: ${config.trading.orderType}`);
+    logger.info(`Copy sells: ${config.trading.copySells ? 'Yes' : 'No (BUY only)'}`);
     logger.info(`WebSocket: ${config.monitoring.useWebSocket ? 'Enabled' : 'Disabled'}`);
     if (config.risk.maxSessionNotional > 0 || config.risk.maxPerMarketNotional > 0) {
       logger.info(`Risk caps: session=${config.risk.maxSessionNotional || '∞'} USDC, per-market=${config.risk.maxPerMarketNotional || '∞'} USDC`);
     }
     logger.info(`Auth mode: EOA (signature type 0)`);
-    logger.info('================================');
+    logger.info('================================\n');
 
     validateConfig();
 
     this.botStartTime = Date.now();
     logger.info(`⏰ Bot start time: ${new Date(this.botStartTime).toISOString()}`);
-    logger.info('   (Only trades after this time will be copied)');
+    logger.info('   (Only trades after this time will be copied)\n');
 
     await this.monitor.initialize();
     await this.executor.initialize();
@@ -61,7 +68,7 @@ class PolymarketCopyBot {
         const wsAuth = this.executor.getWsAuth();
         const channel = config.monitoring.useUserChannel ? 'user' : 'market';
         await this.wsMonitor.initialize(this.handleNewTrade.bind(this), channel, wsAuth);
-        logger.info(`✅ WebSocket monitor initialized (${channel} channel)`);
+        logger.info(`✅ WebSocket monitor initialized (${channel} channel)\n`);
 
         if (channel === 'market' && config.monitoring.wsAssetIds.length > 0) {
           for (const assetId of config.monitoring.wsAssetIds) {
@@ -75,8 +82,8 @@ class PolymarketCopyBot {
           }
         }
       } catch (error) {
-        logger.warn('⚠️  WebSocket initialization failed, falling back to REST API only');
-        logger.warn(`   Error: ${error}`);
+        logger.error('⚠️  WebSocket initialization failed, falling back to REST API only');
+        logger.error('   Error:', String(error));
         this.wsMonitor = undefined;
       }
     }
@@ -88,14 +95,14 @@ class PolymarketCopyBot {
     if (this.wsMonitor) monitoringMethods.push('WebSocket');
     monitoringMethods.push('REST API');
 
-    logger.info(`🚀 Bot started! Monitoring via: ${monitoringMethods.join(' + ')}`);
+    logger.info(`🚀 Bot started! Monitoring via: ${monitoringMethods.join(' + ')}\n`);
 
     while (this.isRunning) {
       try {
         await this.monitor.pollForNewTrades(this.handleNewTrade.bind(this));
         this.monitor.pruneProcessedHashes();
       } catch (error) {
-        logger.error(`Error in monitoring loop: ${error}`);
+        logger.error('Error in monitoring loop:', String(error));
       }
 
       await this.sleep(config.monitoring.pollInterval);
@@ -118,7 +125,7 @@ class PolymarketCopyBot {
     this.pruneProcessedTrades();
     this.stats.tradesDetected++;
 
-    logger.info('='.repeat(50));
+    logger.info('\n' + '='.repeat(50));
     logger.info(`🎯 NEW TRADE DETECTED`);
     logger.info(`   Time: ${new Date(trade.timestamp).toISOString()}`);
     logger.info(`   Market: ${trade.market}`);
@@ -127,16 +134,25 @@ class PolymarketCopyBot {
     logger.info(`   Token ID: ${trade.tokenId}`);
     logger.info('='.repeat(50));
 
-    if (trade.side === 'SELL') {
-      logger.warn('⚠️  Skipping SELL trade (BUY-only safeguard enabled)');
+    if (trade.side === 'SELL' && !config.trading.copySells) {
+      logger.warn('⚠️  Skipping SELL trade (COPY_SELLS=false, BUY-only mode)');
       return;
+    }
+
+    const copyNotional = this.executor.calculateCopySize(trade.size);
+
+    if (trade.side === 'SELL') {
+      const copyShares = this.executor.calculateSharesForNotional(copyNotional, trade.price);
+      const position = this.positions.getPosition(trade.tokenId);
+      if (!position || position.shares < copyShares) {
+        logger.warn(`⚠️  Skipping SELL trade: insufficient position (have ${position?.shares?.toFixed(4) ?? 0}, need ${copyShares.toFixed(4)} shares)`);
+        return;
+      }
     }
 
     if (this.wsMonitor) {
       await this.wsMonitor.subscribeToMarket(trade.tokenId);
     }
-
-    const copyNotional = this.executor.calculateCopySize(trade.size);
     const riskCheck = this.risk.checkTrade(trade, copyNotional);
     if (!riskCheck.allowed) {
       logger.warn(`⚠️  Risk check blocked trade: ${riskCheck.reason}`);
@@ -156,6 +172,12 @@ class PolymarketCopyBot {
       this.stats.totalVolume += result.copyNotional;
       logger.info(`✅ Successfully copied trade!`);
       logger.info(`📊 Session Stats: ${this.stats.tradesCopied}/${this.stats.tradesDetected} copied, ${this.stats.tradesFailed} failed`);
+
+      if (config.run.exitAfterFirstSellCopy && result.side === 'SELL') {
+        logger.info('\n🎯 EXIT_AFTER_FIRST_SELL_COPY: First SELL copied successfully. Exiting.');
+        this.stop();
+        process.exit(0);
+      }
     } catch (error: any) {
       this.stats.tradesFailed++;
       logger.error(`❌ Failed to copy trade`);
@@ -189,12 +211,12 @@ class PolymarketCopyBot {
       this.wsMonitor.close();
     }
 
-    logger.info('🛑 Bot stopped');
+    logger.info('\n🛑 Bot stopped');
     this.printStats();
   }
   
   printStats(): void {
-    logger.info('📊 Session Statistics:');
+    logger.info('\n📊 Session Statistics:');
     logger.info(`   Trades detected: ${this.stats.tradesDetected}`);
     logger.info(`   Trades copied: ${this.stats.tradesCopied}`);
     logger.info(`   Trades failed: ${this.stats.tradesFailed}`);
@@ -228,17 +250,16 @@ class PolymarketCopyBot {
   }
 }
 
-const RETRY_DELAY_MS = 10_000;
-
-async function sleep(ms: number) {
+function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function main() {
-  let bot: PolymarketCopyBot | null = null;
+  const retryMs = parseInt(process.env.INIT_RETRY_MS || '30000', 10);
+  let bot: PolymarketCopyBot | undefined;
 
   process.on('SIGINT', () => {
-    logger.info('Received SIGINT, shutting down...');
+    logger.info('\n\nReceived SIGINT, shutting down...');
     bot?.stop();
     process.exit(0);
   });
@@ -248,28 +269,28 @@ async function main() {
     process.exit(0);
   });
 
-  while (true) {
-    reloadConfig();
-    const missing = getMissingFields();
-
-    if (missing.length > 0) {
-      logger.warn(`⚙️  Missing required config: ${missing.join(', ')}`);
-      logger.warn(`   Create a .env file based on .env.example and set the missing values.`);
-      logger.warn(`   Retrying in ${RETRY_DELAY_MS / 1000}s...`);
-      await sleep(RETRY_DELAY_MS);
+  for (;;) {
+    refreshConfigFromEnv();
+    if (!isEnvCredentialsReady()) {
+      logMissingEnvCredentials();
+      logger.error(
+        `Waiting for .env and PRIVATE_KEY — retry in ${retryMs / 1000}s (set INIT_RETRY_MS to change).`
+      );
+      await delay(retryMs);
       continue;
     }
 
+    bot = new PolymarketCopyBot();
     try {
-      bot = new PolymarketCopyBot();
       await bot.initialize();
       await bot.start();
-    } catch (error: any) {
-      logger.error(`Bot encountered an error: ${error?.message || error}`);
-      logger.info(`Restarting in ${RETRY_DELAY_MS / 1000}s...`);
-      bot?.stop();
-      bot = null;
-      await sleep(RETRY_DELAY_MS);
+      break;
+    } catch (error) {
+      logger.error('Error during init or run:', String(error));
+      logger.error(`Process will retry in ${retryMs / 1000}s (set INIT_RETRY_MS to change).`);
+      bot.stop();
+      bot = undefined;
+      await delay(retryMs);
     }
   }
 }

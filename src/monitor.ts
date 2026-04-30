@@ -113,7 +113,7 @@ export class TradeMonitor {
         logger.info(`🔍 Processed ${newTradesCount} new trade(s)`);
       }
     } catch (error: any) {
-      logger.error(`❌ Error polling for trades: ${error.message}`);
+      logger.error(`❌ Error polling for trades:`, error.message);
     }
   }
 

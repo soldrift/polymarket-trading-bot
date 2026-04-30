@@ -30,7 +30,7 @@ export class RiskManager {
       }
     }
 
-    if (config.risk.maxPerMarketNotional > 0) {
+    if (config.risk.maxPerMarketNotional > 0 && trade.side === 'BUY') {
       const current = this.positions.getNotional(trade.tokenId);
       const next = current + copyNotional;
       if (next > config.risk.maxPerMarketNotional) {

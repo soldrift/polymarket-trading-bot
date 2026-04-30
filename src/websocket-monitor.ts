@@ -93,7 +93,7 @@ export class WebSocketMonitor {
 
         this.ws.on('close', (code: number, reason: Buffer) => {
           const reasonText = reason?.toString() || 'no reason';
-          logger.warn(`❌ WebSocket disconnected (code=${code}, reason=${reasonText})`);
+          logger.error(`❌ WebSocket disconnected (code=${code}, reason=${reasonText})`);
           this.isConnected = false;
           this.ws = null;
           this.stopPingInterval();
@@ -103,7 +103,7 @@ export class WebSocketMonitor {
         });
 
         this.ws.on('error', (error: Error) => {
-          logger.error(`WebSocket error: ${error.message}`);
+          logger.error('WebSocket error:', error.message);
           reject(error);
         });
 
@@ -247,7 +247,7 @@ export class WebSocketMonitor {
         this.handleTradeMessage(message as LastTradeMessage);
       }
     } catch (error) {
-      logger.error(`Error parsing WebSocket message: ${error}`);
+      logger.error('Error parsing WebSocket message:', String(error));
     }
   }
 
@@ -282,7 +282,7 @@ export class WebSocketMonitor {
         await this.onTradeCallback(trade);
       }
     } catch (error) {
-      logger.error(`Error handling trade message: ${error}`);
+      logger.error('Error handling trade message:', String(error));
     }
   }
 
@@ -338,7 +338,7 @@ export class WebSocketMonitor {
           }
         }
       } catch (error) {
-        logger.error(`Reconnection failed: ${error}`);
+        logger.error('Reconnection failed:', String(error));
         this.attemptReconnect();
       }
     }, delay);
